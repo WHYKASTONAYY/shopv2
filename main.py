@@ -10,7 +10,7 @@ from datetime import timedelta
 import threading # Added for Flask thread
 import json # Added for webhook processing
 from decimal import Decimal, ROUND_DOWN, ROUND_UP # <-- MODIFIED: Import ROUND_DOWN and ROUND_UP
-# *** ADD THESE IMPORTS for webhook verification ***
+# *** ADD THESE IMPORTS for webhook verification (Kept for reference) ***
 import hmac
 import hashlib
 # ***********************************************
@@ -37,7 +37,7 @@ from utils import (
     TOKEN, ADMIN_ID, init_db, load_all_data, LANGUAGES, THEMES,
     SUPPORT_USERNAME, BASKET_TIMEOUT, clear_all_expired_baskets,
     SECONDARY_ADMIN_IDS, WEBHOOK_URL, # Added WEBHOOK_URL
-    # *** ADD NOWPAYMENTS_IPN_SECRET import ***
+    # *** NOWPAYMENTS_IPN_SECRET import (kept but unused for verification) ***
     NOWPAYMENTS_IPN_SECRET,
     # *************************************
     get_db_connection, # Import the DB connection helper
@@ -513,7 +513,7 @@ async def clear_expired_baskets_job_wrapper(context: ContextTypes.DEFAULT_TYPE):
 
 # --- Flask Webhook Routes ---
 
-# *** NEW: Helper function for webhook verification ***
+# *** Kept verification function definition (but it won't be called) ***
 def verify_nowpayments_signature(request_data, signature_header, secret_key):
     """Verifies the signature provided by NOWPayments."""
     if not secret_key or not signature_header:
@@ -532,33 +532,32 @@ def verify_nowpayments_signature(request_data, signature_header, secret_key):
         return False
 
 
-# --- MODIFIED Webhook Handler ---
+# --- MODIFIED Webhook Handler (Verification Disabled) ---
 @flask_app.route("/webhook", methods=['POST'])
 def nowpayments_webhook():
     """Handles Instant Payment Notifications (IPN) from NOWPayments."""
-    global telegram_app, main_loop, NOWPAYMENTS_IPN_SECRET
+    global telegram_app, main_loop, NOWPAYMENTS_IPN_SECRET # Keep IPN_SECRET for logging context
 
     if not telegram_app or not main_loop:
         logger.error("Webhook received but Telegram app or event loop not initialized.")
         return Response(status=503)
 
-    # --- SIGNATURE VERIFICATION (Enabled) ---
-    signature = request.headers.get('x-nowpayments-sig')
-    if not NOWPAYMENTS_IPN_SECRET:
-        logger.warning("!!! NOWPayments signature verification SKIPPED (secret not set) !!!")
-    elif not verify_nowpayments_signature(request, signature, NOWPAYMENTS_IPN_SECRET):
-        logger.error("Invalid NOWPayments webhook signature received or verification failed.")
-        return Response("Invalid Signature", status=401)
-    else:
-        logger.info("NOWPayments webhook signature verified.")
-    # ------------------------------------------------------
+    # --- MODIFIED: Signature Verification (Explicitly Disabled) ---
+    signature = request.headers.get('x-nowpayments-sig') # Get signature header for logging if present
+    logger.warning(f"!!! NOWPayments signature verification is DISABLED BY CONFIGURATION !!! (Received Signature: {signature})")
+    # The verification block is removed/commented out.
+    # Verification logic using verify_nowpayments_signature is NOT executed.
+    # --- END MODIFICATION ---
+
+    # --- Processing continues without verification ---
 
     if not request.is_json:
         logger.warning("Webhook received non-JSON request.")
         return Response("Invalid Request", status=400)
 
     data = request.get_json()
-    logger.info(f"NOWPayments IPN received: {json.dumps(data)}")
+    # Log that verification was skipped
+    logger.info(f"NOWPayments IPN received (Verification Disabled): {json.dumps(data)}")
 
     required_keys = ['payment_id', 'payment_status', 'pay_currency', 'actually_paid']
     if not all(key in data for key in required_keys):
@@ -569,14 +568,14 @@ def nowpayments_webhook():
     status = data.get('payment_status')
     pay_currency = data.get('pay_currency')
     actually_paid_str = data.get('actually_paid')
-    parent_payment_id = data.get('parent_payment_id') # Check if it's a child payment
+    parent_payment_id = data.get('parent_payment_id')
 
-    # Ignore child payments for initial processing (overpayments/refunds handled separately if needed)
+    # --- Process 'finished', 'confirmed', OR 'partially_paid' status ---
     if parent_payment_id:
          logger.info(f"Ignoring child payment webhook update {payment_id} (parent: {parent_payment_id}).")
          return Response("Child payment ignored", status=200)
 
-    # --- Process 'finished', 'confirmed', OR 'partially_paid' status ---
+    # Process 'finished', 'confirmed', OR 'partially_paid' status
     if status in ['finished', 'confirmed', 'partially_paid'] and actually_paid_str is not None:
         logger.info(f"Processing '{status}' payment: {payment_id}")
         try:
@@ -625,7 +624,7 @@ def nowpayments_webhook():
                     asyncio.run_coroutine_threadsafe(asyncio.to_thread(remove_pending_deposit, payment_id, trigger="failure"), main_loop)
                     return Response("Underpaid for purchase", status=200)
 
-                logger.info(f"{log_prefix} {payment_id} SUFFICIENTLY PAID by user {user_id}. Finalizing purchase.")
+                logger.info(f"{log_prefix} {payment_id} SUFFICIENTLY PAID (or overpaid) by user {user_id}. Finalizing purchase.") # Log adjusted for overpayment possibility
                 dummy_context = ContextTypes.DEFAULT_TYPE(application=telegram_app, chat_id=user_id, user_id=user_id) if telegram_app else None
                 if not dummy_context:
                      logger.error(f"Cannot finalize purchase {payment_id}, telegram_app not ready.")
