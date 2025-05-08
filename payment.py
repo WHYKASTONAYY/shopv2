@@ -1,3 +1,5 @@
+# --- START OF FILE payment.py ---
+
 import logging
 import sqlite3
 import time
@@ -30,7 +32,8 @@ from utils import ( # Ensure utils imports are correct
     get_nowpayments_min_amount,
     get_db_connection, MEDIA_DIR, PRODUCT_TYPES, DEFAULT_PRODUCT_EMOJI, # Added PRODUCT_TYPES/Emoji
     clear_expired_basket, # Added import
-    _get_lang_data # <--- *** ADDED IMPORT HERE ***
+    _get_lang_data, # <--- *** ADDED IMPORT HERE ***
+    log_admin_action # <<< IMPORT log_admin_action >>>
 )
 # <<< IMPORT USER MODULE >>>
 import user
@@ -581,64 +584,8 @@ async def process_successful_refill(user_id: int, amount_to_add_eur: Decimal, pa
         logger.error(f"Invalid amount_to_add_eur in process_successful_refill: {amount_to_add_eur}")
         return False
 
-    conn = None
-    db_update_successful = False
-    amount_float = float(amount_to_add_eur)
-    new_balance = Decimal('0.0')
-
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute("BEGIN")
-        logger.info(f"Attempting balance update for user {user_id} by {amount_float:.2f} EUR (Refill Payment ID: {payment_id})")
-
-        update_result = c.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount_float, user_id))
-        if update_result.rowcount == 0:
-            logger.error(f"User {user_id} not found during refill DB update (Payment ID: {payment_id}). Rowcount: {update_result.rowcount}")
-            conn.rollback()
-            return False
-
-        c.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
-        new_balance_result = c.fetchone()
-        if new_balance_result: new_balance = Decimal(str(new_balance_result['balance']))
-        else: logger.error(f"Could not fetch new balance for {user_id} after refill update."); conn.rollback(); return False
-
-        conn.commit()
-        db_update_successful = True
-        logger.info(f"Successfully processed refill DB update for user {user_id}. Added: {amount_to_add_eur:.2f} EUR. New Balance: {new_balance:.2f} EUR.")
-
-        top_up_success_title = lang_data.get("top_up_success_title", "✅ Top Up Successful!")
-        amount_added_label = lang_data.get("amount_added_label", "Amount Added")
-        new_balance_label = lang_data.get("new_balance_label", "Your new balance")
-        back_to_profile_button = lang_data.get("back_profile_button", "Back to Profile")
-
-        amount_str = format_currency(amount_to_add_eur)
-        new_balance_str = format_currency(new_balance)
-
-        success_msg = (f"{top_up_success_title}\n\n{amount_added_label}: {amount_str} EUR\n"
-                       f"{new_balance_label}: {new_balance_str} EUR")
-        keyboard = [[InlineKeyboardButton(f"👤 {back_to_profile_button}", callback_data="profile")]]
-
-        # Use a dummy context if necessary, or the provided one
-        bot_instance = context.bot if hasattr(context, 'bot') else None
-        if bot_instance:
-            await send_message_with_retry(bot_instance, user_id, success_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
-        else:
-             logger.error(f"Could not get bot instance to notify user {user_id} about refill success.")
-
-
-        return True
-
-    except sqlite3.Error as e:
-        logger.error(f"DB error during process_successful_refill user {user_id} (Payment ID: {payment_id}): {e}", exc_info=True)
-        if conn and conn.in_transaction: conn.rollback()
-        return False
-    except Exception as e:
-         logger.error(f"Unexpected error during process_successful_refill user {user_id} (Payment ID: {payment_id}): {e}", exc_info=True)
-         if conn and conn.in_transaction: conn.rollback()
-         return False
-    finally:
-        if conn: conn.close()
+    # Use the separate crediting function
+    return await credit_user_balance(user_id, amount_to_add_eur, f"Refill payment {payment_id}", context)
 
 
 # --- HELPER: Finalize Purchase (Send Caption Separately) ---
@@ -1007,6 +954,112 @@ async def process_successful_crypto_purchase(user_id: int, basket_snapshot: list
 
     return finalize_success
 
+
+# --- NEW: Helper Function to Credit User Balance (Moved from Previous Response) ---
+async def credit_user_balance(user_id: int, amount_eur: Decimal, reason: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Adds funds to a user's balance and notifies them."""
+    if not isinstance(amount_eur, Decimal) or amount_eur <= Decimal('0.0'):
+        logger.error(f"Invalid amount provided to credit_user_balance for user {user_id}: {amount_eur}")
+        return False
+
+    conn = None
+    db_update_successful = False
+    amount_float = float(amount_eur)
+    new_balance_decimal = Decimal('0.0')
+
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("BEGIN")
+        logger.info(f"Attempting to credit balance for user {user_id} by {amount_float:.2f} EUR. Reason: {reason}")
+
+        # Get old balance for logging
+        c.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        old_balance_res = c.fetchone(); old_balance_float = old_balance_res['balance'] if old_balance_res else 0.0
+
+        update_result = c.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount_float, user_id))
+        if update_result.rowcount == 0:
+            logger.error(f"User {user_id} not found during balance credit update. Reason: {reason}")
+            conn.rollback()
+            return False
+
+        c.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        new_balance_result = c.fetchone()
+        if new_balance_result:
+             new_balance_decimal = Decimal(str(new_balance_result['balance']))
+        else:
+             logger.error(f"Could not fetch new balance for {user_id} after credit update."); conn.rollback(); return False
+
+        conn.commit()
+        db_update_successful = True
+        logger.info(f"Successfully credited balance for user {user_id}. Added: {amount_eur:.2f} EUR. New Balance: {new_balance_decimal:.2f} EUR. Reason: {reason}")
+
+        # Log this as an automatic system action (or maybe under ADMIN_ID if preferred)
+        log_admin_action(
+             admin_id=0, # Or ADMIN_ID if you want admin to "own" these logs
+             action="BALANCE_CREDIT_AUTO",
+             target_user_id=user_id,
+             reason=reason,
+             amount_change=amount_float,
+             old_value=old_balance_float,
+             new_value=float(new_balance_decimal)
+        )
+
+        # Notify User
+        bot_instance = context.bot if hasattr(context, 'bot') else None
+        if bot_instance:
+            # Get user language for notification
+            lang = context.user_data.get("lang", "en") # Get from context if available
+            if not lang: # Fallback: Get from DB if not in context
+                conn_lang = None
+                try:
+                    conn_lang = get_db_connection()
+                    c_lang = conn_lang.cursor()
+                    c_lang.execute("SELECT language FROM users WHERE user_id = ?", (user_id,))
+                    lang_res = c_lang.fetchone()
+                    if lang_res and lang_res['language'] in LANGUAGES: lang = lang_res['language']
+                except Exception as lang_e: logger.warning(f"Could not fetch user lang for credit msg: {lang_e}")
+                finally:
+                     if conn_lang: conn_lang.close()
+            lang_data = LANGUAGES.get(lang, LANGUAGES['en'])
+
+
+            # <<< TODO: Add these messages to LANGUAGES dictionary >>>
+            if "Overpayment" in reason:
+                # Example message key: "credit_overpayment_purchase"
+                notify_msg_template = lang_data.get("credit_overpayment_purchase", "✅ Your purchase was successful! Additionally, an overpayment of {amount} EUR has been credited to your balance. Your new balance is {new_balance} EUR.")
+            elif "Underpayment" in reason:
+                # Example message key: "credit_underpayment_purchase"
+                 notify_msg_template = lang_data.get("credit_underpayment_purchase", "ℹ️ Your purchase failed due to underpayment, but the received amount ({amount} EUR) has been credited to your balance. Your new balance is {new_balance} EUR.")
+            else: # Generic credit (like Refill)
+                # Example message key: "credit_refill"
+                notify_msg_template = lang_data.get("credit_refill", "✅ Your balance has been credited by {amount} EUR. Reason: {reason}. New balance: {new_balance} EUR.")
+
+            notify_msg = notify_msg_template.format(
+                amount=format_currency(amount_eur),
+                new_balance=format_currency(new_balance_decimal),
+                reason=reason # Include reason for generic credits
+            )
+
+            await send_message_with_retry(bot_instance, user_id, notify_msg, parse_mode=None)
+        else:
+             logger.error(f"Could not get bot instance to notify user {user_id} about balance credit.")
+
+        return True
+
+    except sqlite3.Error as e:
+        logger.error(f"DB error during credit_user_balance user {user_id}: {e}", exc_info=True)
+        if conn and conn.in_transaction: conn.rollback()
+        return False
+    except Exception as e:
+         logger.error(f"Unexpected error during credit_user_balance user {user_id}: {e}", exc_info=True)
+         if conn and conn.in_transaction: conn.rollback()
+         return False
+    finally:
+        if conn: conn.close()
+# --- END credit_user_balance ---
+
+
 # --- Callback Handler Wrapper (to keep main.py structure) ---
 async def handle_confirm_pay(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
     """
@@ -1042,3 +1095,5 @@ async def handle_cancel_crypto_payment(update: Update, context: ContextTypes.DEF
     # Always attempt to refresh the basket view
     logger.debug(f"Redirecting user {user_id} back to basket view after crypto cancel attempt.")
     await user.handle_view_basket(update, context)
+
+# --- END OF FILE payment.py ---
