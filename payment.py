@@ -1,5 +1,3 @@
-# --- START OF FILE payment.py ---
-
 import logging
 import sqlite3
 import time
@@ -31,7 +29,8 @@ from utils import ( # Ensure utils imports are correct
     add_pending_deposit, remove_pending_deposit, # Make sure add_pending_deposit is imported
     get_nowpayments_min_amount,
     get_db_connection, MEDIA_DIR, PRODUCT_TYPES, DEFAULT_PRODUCT_EMOJI, # Added PRODUCT_TYPES/Emoji
-    clear_expired_basket # Added import
+    clear_expired_basket, # Added import
+    _get_lang_data # <--- *** ADDED IMPORT HERE ***
 )
 # <<< IMPORT USER MODULE >>>
 import user
@@ -1024,7 +1023,7 @@ async def handle_cancel_crypto_payment(update: Update, context: ContextTypes.DEF
     """Handles user explicitly cancelling a pending crypto payment."""
     query = update.callback_query
     user_id = query.from_user.id
-    lang, lang_data = _get_lang_data(context)
+    lang, lang_data = _get_lang_data(context) # <<< FIXED: Use helper
 
     payment_id = context.user_data.pop('pending_payment_id', None)
 
@@ -1043,6 +1042,3 @@ async def handle_cancel_crypto_payment(update: Update, context: ContextTypes.DEF
     # Always attempt to refresh the basket view
     logger.debug(f"Redirecting user {user_id} back to basket view after crypto cancel attempt.")
     await user.handle_view_basket(update, context)
-
-
-# --- END OF FILE payment.py ---
